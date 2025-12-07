@@ -78,7 +78,7 @@ unsigned int count_pipes(char **argv, int argc, unsigned int pipe_pos[])
 
 
 /* выполнение одиночной команды */
-int run_command(char **argv) 
+int run_command(char **argv, int bg) 
 {
     pid_t pid = fork();
     
@@ -95,18 +95,21 @@ int run_command(char **argv)
         exit(-1);
     }
     
-    int status;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status) && (WEXITSTATUS(status) == (signed char)-1)) 
+    if (bg == 0)
     {
-        return 1;
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && (WEXITSTATUS(status) == (signed char)-1)) 
+        {
+            return 1;
+        }
     }
     return 0;
 }
 
 
 /* выполнение конвейера команд */
-int run_multiple(char **argv, int argc, int count, int pipe_pos[]) 
+int run_multiple(char **argv, int argc, unsigned int count, unsigned int pipe_pos[], int bg) 
 {  	
     /* создаем пайпы для всех команд, кроме последней */
     int pipes[MAX_ARGS][2];
@@ -198,18 +201,20 @@ int run_multiple(char **argv, int argc, int count, int pipe_pos[])
         close(pipes[i][1]);
     }
     
-    int status;
     unsigned int ret_val = 0;
-    for (int i = 0; i < count + 1; i++) 
+    if (bg == 0)
     {
-        waitpid(pids[i], &status, 0);
-        
-        if (WIFEXITED(status) && (WEXITSTATUS(status) == (signed char)-1)) 
+        int status;
+        for (int i = 0; i < count + 1; i++) 
         {
-            ret_val++;
-        }
+            waitpid(pids[i], &status, 0);
+            
+            if (WIFEXITED(status) && (WEXITSTATUS(status) == (signed char)-1)) 
+            {
+                ret_val++;
+            }
+        }   
     }
-    
     return ret_val;
 }
 
@@ -230,16 +235,26 @@ int execute_commands(char *input)
         return 0;  /* пустая команда */
     }
 
+    /* проверка фонового режима */
+    int bg = 0;
+    if (strcmp(argv[argc - 1], "&") == 0)
+    {
+        bg = 1;
+        argv[argc - 1] = NULL;  /* убираем & */
+        argc--;
+    }
+
+
     unsigned int pipe_pos[MAX_ARGS];
     unsigned int count = count_pipes(argv, argc, pipe_pos);
     
     if (count == 0)
     {
-		return run_command(argv);
+		return run_command(argv, bg);
 	}
 	else if (count > 0)
 	{
-		return run_multiple(argv, argc, count, pipe_pos);
+		return run_multiple(argv, argc, count, pipe_pos, bg);
 	}
     else
     {
