@@ -14,38 +14,45 @@
 
 
 /* разбиение строки на аргументы */
-int split_args(char *input, char **argv, int max_args) 
+int split_args(char *input, char **argv)
 {
-    int argc = 0, i = 0, in_arg = 0;
+    int argc = 0, i = 0, flag = 0;
     
-    if (input == NULL || argv == NULL)  return 0;
-    
-    /* пропускаем начальные пробелы */
-    while (input[i] == ' ')  i++;
-    
-    while (input[i] != 0 && input[i] != '\n' && argc < max_args - 1) 
+    if (input == NULL || argv == NULL)
     {
-        if (input[i] == ' ') 
+        return 0;
+    }
+
+    /* пропускаем начальные пробелы */
+    while (input[i] == ' ' || input[i] == '\t')
+    {
+        i++;
+    }
+
+    while (input[i] != 0 && input[i] != '\n') 
+    {
+        if (input[i] == ' ' || input[i] == '\t') 
         {
-            if (in_arg) 
+            if (flag == 1) 
             {
                 input[i] = 0;  /* завершаем текущий аргумент */
-                in_arg = 0;
+                flag = 0;
             }
         } 
         else 
         {
-            if (!in_arg) 
+            if (flag == 0) 
             {
-                argv[argc++] = &input[i];  /* начало нового аргумента */
-                in_arg = 1;
+                argv[argc] = &input[i];  /* вписываем начало нового аргумента/команды */
+                argc++;
+                flag = 1;
             }
         }
         i++;
     }
     
     /* завершаем последний аргумент */
-    if (in_arg && i > 0)
+    if (flag == 1)
     {
         input[i] = 0;
     }
@@ -54,19 +61,19 @@ int split_args(char *input, char **argv, int max_args)
     return argc;
 }
 
-
-/* считаем кол-во '|' */
-int count_commands(char **argv, int argc, int pipe_positions[]) 
+/* считаем количество '|' */
+unsigned int count_pipes(char **argv, int argc, unsigned int pipe_pos[])
 {
-    int count = 0;
-    for (int i = 0; i < argc; i++) 
-    {
-        if (argv[i][0] == '|' && argv[i][1] == 0) 
-        {
-            pipe_positions[count++] = i;
-        }
-    }
-    return count;
+	unsigned int count = 0;
+	for (unsigned int i = 0; i < argc; i++)
+	{
+		if (argv[i][0] == '|' && argv[i][1] == 0)
+		{
+			pipe_pos[count] = i;
+            count++;
+		}
+	}
+	return count;
 }
 
 
@@ -90,21 +97,19 @@ int run_command(char **argv)
     
     int status;
     waitpid(pid, &status, 0);
-    
     if (WIFEXITED(status) && (WEXITSTATUS(status) == (signed char)-1)) 
     {
         return 1;
     }
-    
     return 0;
 }
 
+
 /* выполнение конвейера команд */
-int run_conveyor(char **argv, int argc, int count, int pipe_positions[]) 
-{  
-    int pipes[MAX_ARGS][2];
-    
+int run_multiple(char **argv, int argc, int count, int pipe_pos[]) 
+{  	
     /* создаем пайпы для всех команд, кроме последней */
+    int pipes[MAX_ARGS][2];
     for (int i = 0; i < count; i++) 
     {
         if (pipe(pipes[i]) == -1) 
@@ -116,18 +121,12 @@ int run_conveyor(char **argv, int argc, int count, int pipe_positions[])
     
     /* создаем процессы для всех команд */
     pid_t pids[MAX_ARGS];
-    
-    for (int cmd_idx = 0; cmd_idx < count + 1; cmd_idx++) 
+    for (int k = 0; k < count + 1; k++) 
     {
-        pids[cmd_idx] = fork();
-        
-        if (pids[cmd_idx] == -1) 
+        pids[k] = fork();
+        if (pids[k] == -1) 
         {
             perror("fork");
-            for (int j = 0; j < cmd_idx; j++) 
-            {
-                kill(pids[j], SIGTERM);
-            }
             for (int j = 0; j < count; j++) 
             {
                 close(pipes[j][0]);
@@ -136,61 +135,63 @@ int run_conveyor(char **argv, int argc, int count, int pipe_positions[])
             return 1;
         }
         
-        if (pids[cmd_idx] == 0) 
+        if (pids[k] == 0) 
         {
-            if (cmd_idx > 0) 
+            /* дублируем stdin в пайп для связи с предыдущим процессом */
+            if (k > 0) 
             {
-                dup2(pipes[cmd_idx - 1][0], STDIN_FILENO);
+                dup2(pipes[k - 1][0], 0);
             }
             
-            if (cmd_idx < count) 
+            /* дублируем stdout в пайп текущего процесса */
+            if (k < count) 
             {
-                dup2(pipes[cmd_idx][1], STDOUT_FILENO);
+                dup2(pipes[k][1], 1);
             }
             
+            /* закрываем ненужные пайпы */
             for (int j = 0; j < count; j++) 
             {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
             }
             
-            int start_idx, end_idx;
-            
-            if (cmd_idx == 0) 
+            /* выборка команд/аргументов  */
+            int start_index, finish_index;
+            if (k == 0)  /* первая команда */
             {
-                /* первая команда */
-                start_idx = 0;
-                end_idx = pipe_positions[0];
+                start_index = 0;
+                finish_index = pipe_pos[0];
             } 
-            else if (cmd_idx == count) 
+            else if (k == count)  /* последняя команда */
             {
-                /* последняя команда */
-                start_idx = pipe_positions[cmd_idx - 1] + 1;
-                end_idx = argc;
-            } 
-            else 
+                start_index = pipe_pos[k - 1] + 1;
+                finish_index = argc;
+            }
+            else  /* команда в середине */
             {
-                /* команда в середине */
-                start_idx = pipe_positions[cmd_idx - 1] + 1;
-                end_idx = pipe_positions[cmd_idx];
+                start_index = pipe_pos[k - 1] + 1;
+                finish_index = pipe_pos[k];
             }
             
             /* массив аргументов для текущей команды */
-            char *cmd_argv[MAX_ARGS];
-            int cmd_argc = 0;
+            char *current_argv[MAX_ARGS];
+            int current_argc = 0;
             
-            for (int i = start_idx; i < end_idx; i++) 
+            for (int i = start_index; i < finish_index; i++) 
             {
-                cmd_argv[cmd_argc++] = argv[i];
+                current_argv[current_argc] = argv[i];
+                current_argc++;
             }
-            cmd_argv[cmd_argc] = NULL;
+            current_argv[current_argc] = NULL;
 
-            execvp(cmd_argv[0], cmd_argv);
-            fprintf(stderr, "Не смогли запустить программу '%s': %s\n", cmd_argv[0], strerror(errno));
+            execvp(current_argv[0], current_argv);
+            fprintf(stderr, "Не смогли запустить программу '%s': %s\n", current_argv[0], strerror(errno));
             exit(-1);
         }
     }
     
+    /* закрываем пайпы в отце */
     for (int i = 0; i < count; i++) 
     {
         close(pipes[i][0]);
@@ -199,47 +200,50 @@ int run_conveyor(char **argv, int argc, int count, int pipe_positions[])
     
     int status;
     unsigned int ret_val = 0;
-    
     for (int i = 0; i < count + 1; i++) 
     {
         waitpid(pids[i], &status, 0);
         
         if (WIFEXITED(status) && (WEXITSTATUS(status) == (signed char)-1)) 
         {
-            ret_val |= (1 << i);
+            ret_val++;
         }
     }
     
-    return (ret_val << 4);
+    return ret_val;
 }
 
 
 int execute_commands(char *input) 
 {
-    if (input == NULL || input[0] == 0 || input[0] == '\n')  return 0;
-    
-    /* копия строки для разбора аргументов */
-    char input_copy[MAX_STR_SIZE];
-    strncpy(input_copy, input, MAX_STR_SIZE - 1);
-    input_copy[MAX_STR_SIZE - 1] = 0;
-    
+    if (input == NULL || input[0] == 0 || input[0] == '\n')
+    {
+        return 0;
+    }
+
     /* разбиваем строку на аргументы */
     char *argv[MAX_ARGS];
-    int argc = split_args(input_copy, argv, MAX_ARGS);
+    int argc = split_args(input, argv);
     
-    if (argc == 0)  return 0;  /* пустая команда */
-    
-    /* находим позиции '|' */
-    int pipe_positions[MAX_ARGS];
-    int count = count_commands(argv, argc, pipe_positions);
-    
-    if (count == 0) 
+    if (argc == 0)
     {
-        return run_command(argv);
-    } 
-    else 
+        return 0;  /* пустая команда */
+    }
+
+    unsigned int pipe_pos[MAX_ARGS];
+    unsigned int count = count_pipes(argv, argc, pipe_pos);
+    
+    if (count == 0)
     {
-        return run_conveyor(argv, argc, count, pipe_positions);
+		return run_command(argv);
+	}
+	else if (count > 0)
+	{
+		return run_multiple(argv, argc, count, pipe_pos);
+	}
+    else
+    {
+        return 1;
     }
 }
 
@@ -284,7 +288,7 @@ int main()
         strcpy(path, new_path);
     }
 
-    printf("\e[1;32;49m%s\e[0m:\e[1;34;49m%s\e[0m$ ", pw->pw_name, path);
+    printf("\e[1;38;5;211m%s\e[0m:\e[1;38;5;5m%s\e[0m$ ", pw->pw_name, path);
    
     /* ввод команд в stdin  */
     char input[MAX_STR_SIZE];
@@ -295,15 +299,12 @@ int main()
             break;
         }
         
-        size_t len = strlen(input);
-        if (len > 0 && input[len - 1] == '\n') 
+        if (execute_commands(input) == 1)
         {
-            input[len - 1] = 0;
+            fprintf(stderr, "Произошла ошибка при выполнении команд.\n");
         }
         
-        execute_commands(input);
-        
-        printf("\e[1;32;49m%s\e[0m:\e[1;34;49m%s\e[0m$ ", pw->pw_name, path);
+        printf("\e[1;38;5;211m%s\e[0m:\e[1;38;5;5m%s\e[0m$ ", pw->pw_name, path);
     }
 
     printf("\e[2J\e[H");
