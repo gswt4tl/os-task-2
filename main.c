@@ -4,6 +4,7 @@
 #include <pwd.h>
 #include <sys/types.h>
 #include <limits.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -11,6 +12,24 @@
 
 #define MAX_STR_SIZE 1024
 #define MAX_ARGS 256
+
+
+void collect_zombies(int sig)
+{
+	while (1)
+	{
+		pid_t pid = waitpid(-1, NULL, WNOHANG);
+		if (pid > 0)
+		{
+			continue;
+		}
+		
+		if (pid == -1 || pid == 0)
+		{
+			break;
+		}
+	}
+}
 
 
 /* разбиение строки на аргументы */
@@ -95,15 +114,23 @@ int run_command(char **argv, int bg)
         exit(-1);
     }
     
-    if (bg == 0)
+    if (bg == 1)
     {
-        int status;
-        waitpid(pid, &status, 0);
-        if (WIFEXITED(status) && (WEXITSTATUS(status) == (signed char)-1)) 
-        {
-            return 1;
-        }
+        printf("[%d] %d\n", 1, pid);  // вывод PID фонового процесса
+        fflush(stdout);               // ОБЯЗАТЕЛЬНО!
+        return 0;
     }
+    
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status) != 0;
+
+    if (WIFSIGNALED(status))
+        return 1;
+
     return 0;
 }
 
@@ -202,18 +229,31 @@ int run_multiple(char **argv, int argc, unsigned int count, unsigned int pipe_po
     }
     
     unsigned int ret_val = 0;
-    if (bg == 0)
+    if (bg == 1)
+    {
+        printf("[%d] %d\n", 1, pids[count]);  // показываем PID последней команды в конвейере
+        fflush(stdout);
+        return ret_val;
+    }
+    
+    else if (bg == 0)
     {
         int status;
-        for (int i = 0; i < count + 1; i++) 
+        for (unsigned int i = 0; i < count + 1; i++)
         {
             waitpid(pids[i], &status, 0);
-            
-            if (WIFEXITED(status) && (WEXITSTATUS(status) == (signed char)-1)) 
+            if (WIFEXITED(status))
+            {
+                if (WEXITSTATUS(status) != 0)
+                {
+                    ret_val++;
+                }
+            }
+            else if (WIFSIGNALED(status))
             {
                 ret_val++;
             }
-        }   
+        }
     }
     return ret_val;
 }
@@ -305,6 +345,17 @@ int main()
 
     printf("\e[1;38;5;211m%s\e[0m:\e[1;38;5;5m%s\e[0m$ ", pw->pw_name, path);
    
+	/* обработчик сигнала SIGCHLD */
+	struct sigaction sa;
+	sa.sa_handler = collect_zombies;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	
+	if (sigaction(SIGCHLD, &sa, NULL) == -1)
+	{
+		fprintf(stderr, "Не удалось установить обработчик сигнала SIGCHLD.\n");
+	}
+   
     /* ввод команд в stdin  */
     char input[MAX_STR_SIZE];
     while (fgets(input, MAX_STR_SIZE, stdin) != NULL)
@@ -319,7 +370,9 @@ int main()
             fprintf(stderr, "Произошла ошибка при выполнении команд.\n");
         }
         
+        fflush(stdout);
         printf("\e[1;38;5;211m%s\e[0m:\e[1;38;5;5m%s\e[0m$ ", pw->pw_name, path);
+        fflush(stdout);
     }
 
     printf("\e[2J\e[H");
