@@ -14,6 +14,19 @@
 #define MAX_ARGS 256
 
 
+void sigint_handler(int sig)
+{
+    pid_t fg = tcgetpgrp(0);    /* кто владеет терминалом */
+    pid_t shell = getpgrp();	/* группа шелла */
+
+    if (fg != shell && fg > 0)
+    {
+        kill(-fg, SIGINT);  /* sigint всей проц. группе */
+        /* - означет всю группу процессов */
+    }
+}
+
+
 void collect_zombies(int sig)
 {
 	while (1)
@@ -109,6 +122,14 @@ int run_command(char **argv, int bg)
     
     if (pid == 0) 
     {
+		
+		/* из man setpgid: If pid is zero, then the process ID of the calling process is used.
+		 * If pgid is zero, then the PGID of the process specified by pid is made the
+	    same as its process ID. */
+		setpgid(0, 0);
+		
+		signal(SIGINT, SIG_DFL);  /* SIGINT - ctrl + c */
+		
         execvp(argv[0], argv);
         fprintf(stderr, "Не смогли запустить программу '%s': %s\n", argv[0], strerror(errno));
         exit(-1);
@@ -116,15 +137,16 @@ int run_command(char **argv, int bg)
     
     if (bg == 1)
     {
-        printf("[%d] %d\n", 1, pid);  // вывод PID фонового процесса
-        fflush(stdout);               // ОБЯЗАТЕЛЬНО!
         return 0;
     }
     
-
+	tcsetpgrp(0, pid);
+	
     int status;
     waitpid(pid, &status, 0);
 
+	tcsetpgrp(0, getpgrp());
+	
     if (WIFEXITED(status))
         return WEXITSTATUS(status) != 0;
 
@@ -151,6 +173,7 @@ int run_multiple(char **argv, int argc, unsigned int count, unsigned int pipe_po
     
     /* создаем процессы для всех команд */
     pid_t pids[MAX_ARGS];
+    pid_t leader_pid = -1;
     for (int k = 0; k < count + 1; k++) 
     {
         pids[k] = fork();
@@ -167,6 +190,18 @@ int run_multiple(char **argv, int argc, unsigned int count, unsigned int pipe_po
         
         if (pids[k] == 0) 
         {
+			/* процессная группа */
+			if (k == 0)
+			{
+				setpgid(0, 0);
+			}
+			else
+			{
+				setpgid(0, pids[0]);
+			}
+
+			signal(SIGINT, SIG_DFL);
+    
             /* дублируем stdin в пайп для связи с предыдущим процессом */
             if (k > 0) 
             {
@@ -219,6 +254,14 @@ int run_multiple(char **argv, int argc, unsigned int count, unsigned int pipe_po
             fprintf(stderr, "Не смогли запустить программу '%s': %s\n", current_argv[0], strerror(errno));
             exit(-1);
         }
+        else  /* в родителе */
+        {
+			if (k == 0)  /* 1-я команда конвейера - лидер проц. гр. */
+			{
+				leader_pid = pids[0];
+			}
+			setpgid(pids[k], leader_pid);  /* все остальные - присоед-ся */
+		}
     }
     
     /* закрываем пайпы в отце */
@@ -231,17 +274,19 @@ int run_multiple(char **argv, int argc, unsigned int count, unsigned int pipe_po
     unsigned int ret_val = 0;
     if (bg == 1)
     {
-        printf("[%d] %d\n", 1, pids[count]);  // показываем PID последней команды в конвейере
-        fflush(stdout);
         return ret_val;
     }
-    
     else if (bg == 0)
     {
+		tcsetpgrp(0, pids[0]);
+		
         int status;
         for (unsigned int i = 0; i < count + 1; i++)
         {
             waitpid(pids[i], &status, 0);
+            
+            tcsetpgrp(0, getpgrp());
+            
             if (WIFEXITED(status))
             {
                 if (WEXITSTATUS(status) != 0)
@@ -305,6 +350,16 @@ int execute_commands(char *input)
 
 int main()
 {
+	pid_t shell_pgid = getpid();
+	setpgid(shell_pgid, shell_pgid);
+
+	/* забираем управление терминалом */
+	tcsetpgrp(0, shell_pgid);
+
+	/* блокируем сигналы управления терминалом, чтобы shell не останавливался */
+	signal(SIGTTIN, SIG_IGN);
+	signal(SIGTTOU, SIG_IGN);
+
     printf("\e[2J\e[H");
 
     /* получили имя пользователя  */ 
@@ -354,6 +409,17 @@ int main()
 	if (sigaction(SIGCHLD, &sa, NULL) == -1)
 	{
 		fprintf(stderr, "Не удалось установить обработчик сигнала SIGCHLD.\n");
+	}
+	
+	/* обработчик сигнала SIGINT */
+	struct sigaction sa_int;
+	sa_int.sa_handler = sigint_handler;
+	sigemptyset(&sa_int.sa_mask);
+	sa_int.sa_flags = SA_RESTART;
+
+	if (sigaction(SIGINT, &sa_int, NULL) == -1)
+	{
+		fprintf(stderr, "Не удалось установить обработчик сигнала SIGINT.\n");
 	}
    
     /* ввод команд в stdin  */
