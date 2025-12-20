@@ -22,7 +22,7 @@ void sigint_handler(int sig)
     if (fg != shell && fg > 0)
     {
         kill(-fg, SIGINT);  /* sigint всей проц. группе */
-        /* - означет всю группу процессов */
+        /* - означает всю группу процессов */
     }
 }
 
